@@ -8,5 +8,3 @@ client_secrets.json
 *.mkv
 *.avi
 *.mov
-generate_session.py
-get_yt_token.py
