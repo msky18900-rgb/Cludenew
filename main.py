@@ -287,16 +287,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-```
-
----
-
-## `requirements.txt`
-```
-pyrogram==2.0.106
-tgcrypto==1.2.5
-google-api-python-client==2.118.0
-google-auth==2.28.0
-google-auth-httplib2==0.2.0
-google-auth-oauthlib==1.2.0
-httplib2==0.22.0
