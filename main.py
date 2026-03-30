@@ -24,37 +24,27 @@ API_HASH       = os.environ["TELEGRAM_API_HASH"]
 BOT_TOKEN      = os.environ["TELEGRAM_BOT_TOKEN"]
 SESSION_STRING = os.environ["PYROGRAM_SESSION_STRING"]
 OWNER_ID       = int(os.environ["OWNER_TELEGRAM_ID"])
-PRIVACY        = "private"   # hardcoded as per your preference
+PRIVACY        = "private"
 
 YT_CLIENT_ID     = os.environ["YT_CLIENT_ID"]
 YT_CLIENT_SECRET = os.environ["YT_CLIENT_SECRET"]
 YT_REFRESH_TOKEN = os.environ["YT_REFRESH_TOKEN"]
 
-# ── In-memory state ───────────────────────────────────────────────────────────
-# Maps original message_id → {"path": str, "title": str, "status_msg_id": int}
 pending: dict = {}
 
 
 # ── Title generator ───────────────────────────────────────────────────────────
 
 def generate_title(message: Message) -> str:
-    """
-    Priority order:
-    1. Original filename (stripped of extension)
-    2. Message caption first line
-    3. Fallback: "Video YYYY-MM-DD HH-MM"
-    """
     for attr in (message.video, message.document):
         if attr and getattr(attr, "file_name", None):
             stem = Path(attr.file_name).stem
             if stem:
                 return _clean(stem)
-
     if message.caption:
         first_line = message.caption.strip().splitlines()[0]
         if first_line:
             return _clean(first_line[:100])
-
     ts = datetime.now().strftime("%Y-%m-%d %H-%M")
     return f"Video {ts}"
 
@@ -83,7 +73,7 @@ def upload_to_youtube(file_path: str, title: str, description: str = "") -> str:
         "snippet": {
             "title": title,
             "description": description,
-            "categoryId": "22",  # People & Blogs
+            "categoryId": "22",
         },
         "status": {
             "privacyStatus": PRIVACY,
@@ -94,19 +84,16 @@ def upload_to_youtube(file_path: str, title: str, description: str = "") -> str:
         file_path,
         mimetype="video/*",
         resumable=True,
-        chunksize=10 * 1024 * 1024,  # 10 MB chunks
+        chunksize=10 * 1024 * 1024,
     )
     insert_request = youtube.videos().insert(
         part="snippet,status", body=body, media_body=media
     )
-
     response = None
     while response is None:
         status, response = insert_request.next_chunk()
         if status:
-            pct = int(status.progress() * 100)
-            logger.info(f"YT upload progress: {pct}%")
-
+            logger.info(f"YT upload progress: {int(status.progress() * 100)}%")
     return f"https://youtu.be/{response['id']}"
 
 
@@ -127,8 +114,6 @@ bot = Client(
 )
 
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
-
 def _confirm_keyboard(msg_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
@@ -141,13 +126,23 @@ def _confirm_keyboard(msg_id: int) -> InlineKeyboardMarkup:
 
 # ── Bot handlers ──────────────────────────────────────────────────────────────
 
+# DEBUG: no owner filter — tells you your real ID vs what's in env
+@bot.on_message(filters.command("id"))
+async def cmd_id(client: Client, message: Message):
+    your_id = message.from_user.id
+    match = "✅ Match!" if your_id == OWNER_ID else "❌ MISMATCH!"
+    await message.reply(
+        f"Your Telegram ID: `{your_id}`\n"
+        f"OWNER_ID in env:  `{OWNER_ID}`\n"
+        f"{match}"
+    )
+
+
 @bot.on_message(
     (filters.video | filters.document) & filters.user(OWNER_ID)
 )
 async def handle_video(client: Client, message: Message):
-    """Step 1 – detect video, auto-generate title, show confirmation buttons."""
     title = generate_title(message)
-
     status_msg = await message.reply(
         f"📹 **Video detected!**\n\n"
         f"🏷 Auto-title: `{title}`\n"
@@ -155,7 +150,6 @@ async def handle_video(client: Client, message: Message):
         f"Tap **Upload** to proceed, **Edit title** to rename, or **Cancel**.",
         reply_markup=_confirm_keyboard(message.id),
     )
-
     pending[message.id] = {
         "path": None,
         "title": title,
@@ -196,13 +190,11 @@ async def handle_callback(client: Client, query: CallbackQuery):
 
 @bot.on_message(filters.text & filters.user(OWNER_ID) & filters.reply)
 async def handle_title_edit(client: Client, message: Message):
-    """User replied with a new title after pressing Edit title."""
     target_id = None
     for orig_id, info in pending.items():
         if info["status_msg_id"] == message.reply_to_message_id and info.get("awaiting_title"):
             target_id = orig_id
             break
-
     if target_id is None:
         return
 
@@ -219,7 +211,6 @@ async def handle_title_edit(client: Client, message: Message):
 
 
 async def _do_download_and_upload(client: Client, status_msg: Message, msg_id: int):
-    """Download via userbot then upload to YouTube."""
     info = pending.get(msg_id)
     if not info:
         return
@@ -267,16 +258,20 @@ async def _do_download_and_upload(client: Client, status_msg: Message, msg_id: i
             pass
 
 
-@bot.on_message(filters.command("start") & filters.user(OWNER_ID))
+# No owner filter on these so they always respond
+@bot.on_message(filters.command("start"))
 async def cmd_start(client: Client, message: Message):
+    your_id = message.from_user.id
+    match = "✅ Match!" if your_id == OWNER_ID else f"❌ MISMATCH! Your ID is {your_id}, env has {OWNER_ID}"
     await message.reply(
-        "👋 **YouTube Uploader Bot**\n\n"
-        "Forward any video — title is auto-generated from the filename or date, "
+        f"👋 **YouTube Uploader Bot**\n\n"
+        f"ID check: {match}\n\n"
+        "Forward any video — title auto-generated from filename or date, "
         "uploaded as **private** to your YouTube channel.\n\n"
-        "You can edit the title before confirming.\n\n"
         "Commands:\n"
+        "`/id` – check your Telegram ID\n"
         "`/start` – this message\n"
-        "`/cancel` – clear all pending uploads\n"
+        "`/cancel` – clear pending uploads\n"
         "`/pending` – list pending uploads"
     )
 
