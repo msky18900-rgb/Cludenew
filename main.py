@@ -5,7 +5,7 @@ import tempfile
 from pathlib import Path
 from datetime import datetime
 
-from pyrogram import Client, filters
+from pyrogram import Client, filters, idle
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 import googleapiclient.discovery
 from googleapiclient.http import MediaFileUpload
@@ -32,6 +32,21 @@ YT_REFRESH_TOKEN = os.environ["YT_REFRESH_TOKEN"]
 
 pending: dict = {}
 
+# ── Clients ───────────────────────────────────────────────────────────────────
+
+userbot = Client(
+    name="userbot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    session_string=SESSION_STRING,
+)
+
+bot = Client(
+    name="ytbot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN,
+)
 
 # ── Title generator ───────────────────────────────────────────────────────────
 
@@ -48,10 +63,8 @@ def generate_title(message: Message) -> str:
     ts = datetime.now().strftime("%Y-%m-%d %H-%M")
     return f"Video {ts}"
 
-
 def _clean(name: str) -> str:
     return name.replace("_", " ").replace("-", " ").strip()
-
 
 # ── YouTube helpers ───────────────────────────────────────────────────────────
 
@@ -66,88 +79,70 @@ def get_youtube_client():
     creds.refresh(Request())
     return googleapiclient.discovery.build("youtube", "v3", credentials=creds)
 
-
-def upload_to_youtube(file_path: str, title: str, description: str = "") -> str:
+def upload_to_youtube(file_path: str, title: str) -> str:
     youtube = get_youtube_client()
     body = {
-        "snippet": {
-            "title": title,
-            "description": description,
-            "categoryId": "22",
-        },
-        "status": {
-            "privacyStatus": PRIVACY,
-            "selfDeclaredMadeForKids": False,
-        },
+        "snippet": {"title": title, "categoryId": "22"},
+        "status": {"privacyStatus": PRIVACY, "selfDeclaredMadeForKids": False},
     }
-    media = MediaFileUpload(
-        file_path,
-        mimetype="video/*",
-        resumable=True,
-        chunksize=10 * 1024 * 1024,
-    )
-    insert_request = youtube.videos().insert(
-        part="snippet,status", body=body, media_body=media
-    )
+    media = MediaFileUpload(file_path, mimetype="video/*", resumable=True, chunksize=10*1024*1024)
+    req = youtube.videos().insert(part="snippet,status", body=body, media_body=media)
     response = None
     while response is None:
-        status, response = insert_request.next_chunk()
+        status, response = req.next_chunk()
         if status:
-            logger.info(f"YT upload progress: {int(status.progress() * 100)}%")
+            logger.info(f"YT upload: {int(status.progress()*100)}%")
     return f"https://youtu.be/{response['id']}"
 
-
-# ── Pyrogram clients ──────────────────────────────────────────────────────────
-
-userbot = Client(
-    "userbot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    session_string=SESSION_STRING,
-)
-
-bot = Client(
-    "ytbot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN,
-)
-
+# ── Keyboard ──────────────────────────────────────────────────────────────────
 
 def _confirm_keyboard(msg_id: int) -> InlineKeyboardMarkup:
-    return InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Upload", callback_data=f"upload:{msg_id}"),
-            InlineKeyboardButton("✏️ Edit title", callback_data=f"edit:{msg_id}"),
-            InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{msg_id}"),
-        ]
-    ])
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Upload", callback_data=f"upload:{msg_id}"),
+        InlineKeyboardButton("✏️ Edit title", callback_data=f"edit:{msg_id}"),
+        InlineKeyboardButton("❌ Cancel", callback_data=f"cancel:{msg_id}"),
+    ]])
 
+# ── Handlers ──────────────────────────────────────────────────────────────────
 
-# ── Bot handlers ──────────────────────────────────────────────────────────────
-
-# DEBUG: no owner filter — tells you your real ID vs what's in env
 @bot.on_message(filters.command("id"))
-async def cmd_id(client: Client, message: Message):
-    your_id = message.from_user.id
-    match = "✅ Match!" if your_id == OWNER_ID else "❌ MISMATCH!"
+async def cmd_id(_, message: Message):
+    uid = message.from_user.id
+    match = "✅ Match!" if uid == OWNER_ID else "❌ MISMATCH!"
+    await message.reply(f"Your ID: `{uid}`\nEnv OWNER_ID: `{OWNER_ID}`\n{match}")
+
+@bot.on_message(filters.command("start"))
+async def cmd_start(_, message: Message):
+    uid = message.from_user.id
+    match = "✅" if uid == OWNER_ID else f"❌ ID mismatch! Your ID={uid}, env={OWNER_ID}"
     await message.reply(
-        f"Your Telegram ID: `{your_id}`\n"
-        f"OWNER_ID in env:  `{OWNER_ID}`\n"
-        f"{match}"
+        f"👋 **YouTube Uploader Bot** {match}\n\n"
+        "Forward any video to upload it as **private** to YouTube.\n"
+        "Title is auto-generated from filename.\n\n"
+        "`/id` · `/pending` · `/cancel`"
     )
 
+@bot.on_message(filters.command("cancel") & filters.user(OWNER_ID))
+async def cmd_cancel(_, message: Message):
+    n = len(pending)
+    pending.clear()
+    await message.reply(f"🗑️ Cleared {n} pending upload(s).")
 
-@bot.on_message(
-    (filters.video | filters.document) & filters.user(OWNER_ID)
-)
-async def handle_video(client: Client, message: Message):
+@bot.on_message(filters.command("pending") & filters.user(OWNER_ID))
+async def cmd_pending(_, message: Message):
+    if not pending:
+        await message.reply("✅ No pending uploads.")
+        return
+    await message.reply("⏳ **Pending:**\n" + "\n".join(f"• `{i['title']}`" for i in pending.values()))
+
+@bot.on_message((filters.video | filters.document) & filters.user(OWNER_ID))
+async def handle_video(_, message: Message):
     title = generate_title(message)
     status_msg = await message.reply(
         f"📹 **Video detected!**\n\n"
-        f"🏷 Auto-title: `{title}`\n"
+        f"🏷 Title: `{title}`\n"
         f"🔒 Privacy: `private`\n\n"
-        f"Tap **Upload** to proceed, **Edit title** to rename, or **Cancel**.",
+        "Tap a button below:",
         reply_markup=_confirm_keyboard(message.id),
     )
     pending[message.id] = {
@@ -158,9 +153,8 @@ async def handle_video(client: Client, message: Message):
         "awaiting_title": False,
     }
 
-
 @bot.on_callback_query(filters.user(OWNER_ID))
-async def handle_callback(client: Client, query: CallbackQuery):
+async def handle_callback(_, query: CallbackQuery):
     action, raw_id = query.data.split(":", 1)
     msg_id = int(raw_id)
 
@@ -172,24 +166,20 @@ async def handle_callback(client: Client, query: CallbackQuery):
 
     if action == "cancel":
         pending.pop(msg_id)
-        await query.message.edit("❌ Upload cancelled.")
+        await query.message.edit("❌ Cancelled.")
         await query.answer()
 
     elif action == "edit":
         info["awaiting_title"] = True
-        await query.message.edit(
-            f"✏️ Current title: `{info['title']}`\n\n"
-            "Reply to this message with the new title:"
-        )
+        await query.message.edit(f"✏️ Current: `{info['title']}`\n\nReply with new title:")
         await query.answer()
 
     elif action == "upload":
-        await query.answer("Starting download…")
-        await _do_download_and_upload(client, query.message, msg_id)
-
+        await query.answer("Starting…")
+        await _do_download_and_upload(query.message, msg_id)
 
 @bot.on_message(filters.text & filters.user(OWNER_ID) & filters.reply)
-async def handle_title_edit(client: Client, message: Message):
+async def handle_title_edit(_, message: Message):
     target_id = None
     for orig_id, info in pending.items():
         if info["status_msg_id"] == message.reply_to_message_id and info.get("awaiting_title"):
@@ -197,28 +187,25 @@ async def handle_title_edit(client: Client, message: Message):
             break
     if target_id is None:
         return
-
     info = pending[target_id]
-    new_title = message.text.strip().splitlines()[0][:100]
-    info["title"] = new_title
+    info["title"] = message.text.strip().splitlines()[0][:100]
     info["awaiting_title"] = False
-
     await message.reply(
-        f"✅ Title updated to: `{new_title}`\n"
-        f"🔒 Privacy: `private`",
+        f"✅ Title: `{info['title']}`",
         reply_markup=_confirm_keyboard(target_id),
     )
 
+# ── Core download + upload ────────────────────────────────────────────────────
 
-async def _do_download_and_upload(client: Client, status_msg: Message, msg_id: int):
+async def _do_download_and_upload(status_msg: Message, msg_id: int):
     info = pending.get(msg_id)
     if not info:
         return
 
-    original_msg = info["original_msg"]
     title = info["title"]
+    original_msg = info["original_msg"]
 
-    await status_msg.edit(f"⬇️ Downloading `{title}` via userbot (no size limit)…")
+    await status_msg.edit(f"⬇️ Downloading `{title}`…")
 
     try:
         tmp_dir = tempfile.mkdtemp()
@@ -226,28 +213,22 @@ async def _do_download_and_upload(client: Client, status_msg: Message, msg_id: i
             original_msg,
             file_name=os.path.join(tmp_dir, "video.mp4"),
         )
-        logger.info(f"Downloaded to {file_path}")
+        logger.info(f"Downloaded: {file_path}")
     except Exception as e:
         await status_msg.edit(f"❌ Download failed:\n`{e}`")
         pending.pop(msg_id, None)
         return
 
-    info["path"] = file_path
-    await status_msg.edit(f"✅ Downloaded!\n🚀 Uploading **{title}** to YouTube (private)…")
+    await status_msg.edit(f"✅ Downloaded!\n🚀 Uploading **{title}** to YouTube…")
 
     try:
         loop = asyncio.get_event_loop()
-        url = await loop.run_in_executor(
-            None, upload_to_youtube, file_path, title, ""
-        )
+        url = await loop.run_in_executor(None, upload_to_youtube, file_path, title)
         await status_msg.edit(
-            f"✅ **Upload complete!**\n\n"
-            f"🎬 `{title}`\n"
-            f"🔒 Private\n"
-            f"🔗 {url}"
+            f"✅ **Done!**\n\n🎬 `{title}`\n🔒 Private\n🔗 {url}"
         )
     except Exception as e:
-        logger.exception("YouTube upload failed")
+        logger.exception("Upload failed")
         await status_msg.edit(f"❌ YouTube upload failed:\n`{e}`")
     finally:
         pending.pop(msg_id, None)
@@ -257,41 +238,6 @@ async def _do_download_and_upload(client: Client, status_msg: Message, msg_id: i
         except Exception:
             pass
 
-
-# No owner filter on these so they always respond
-@bot.on_message(filters.command("start"))
-async def cmd_start(client: Client, message: Message):
-    your_id = message.from_user.id
-    match = "✅ Match!" if your_id == OWNER_ID else f"❌ MISMATCH! Your ID is {your_id}, env has {OWNER_ID}"
-    await message.reply(
-        f"👋 **YouTube Uploader Bot**\n\n"
-        f"ID check: {match}\n\n"
-        "Forward any video — title auto-generated from filename or date, "
-        "uploaded as **private** to your YouTube channel.\n\n"
-        "Commands:\n"
-        "`/id` – check your Telegram ID\n"
-        "`/start` – this message\n"
-        "`/cancel` – clear pending uploads\n"
-        "`/pending` – list pending uploads"
-    )
-
-
-@bot.on_message(filters.command("cancel") & filters.user(OWNER_ID))
-async def cmd_cancel(client: Client, message: Message):
-    count = len(pending)
-    pending.clear()
-    await message.reply(f"🗑️ Cleared {count} pending upload(s).")
-
-
-@bot.on_message(filters.command("pending") & filters.user(OWNER_ID))
-async def cmd_pending(client: Client, message: Message):
-    if not pending:
-        await message.reply("✅ No pending uploads.")
-        return
-    lines = [f"• `{info['title']}`" for info in pending.values()]
-    await message.reply("⏳ **Pending uploads:**\n" + "\n".join(lines))
-
-
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 async def main():
@@ -299,8 +245,7 @@ async def main():
     logger.info("Userbot started")
     await bot.start()
     logger.info("Bot started – waiting for videos…")
-    await asyncio.Event().wait()
-
+    await idle()
 
 if __name__ == "__main__":
     asyncio.run(main())
