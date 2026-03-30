@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.session
+*.session-journal
+client_secrets.json
+.env
+*.mp4
+*.mkv
+*.avi
+*.mov
+generate_session.py
+get_yt_token.py
